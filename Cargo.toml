@@ -1,0 +1,10 @@
+[package]
+name = "hermes-replication"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+serde = { version = "1.0", features = ["derive"] }
+rkyv = { version = "0.7", features = ["validation", "archive_le", "uuid"] }
+uuid = { version = "1.0", features = ["v4", "serde"] }
+tokio = { version = "1.0", features = ["full"] } 

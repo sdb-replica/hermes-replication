@@ -88,4 +88,4 @@ async {
 ⏳ Full invalidation phase (TODO)
 
 ## References
-- [Original Hermes Paper](https://www.usenix.org/system/files/nsdi20-paper-katsarakis.pdf)
+- [Original Hermes Paper](https://arxiv.org/pdf/2001.09804)

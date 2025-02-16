@@ -4,47 +4,72 @@ Hermes is a high-performance, strongly-consistent replication protocol designed 
 
 ## Overview
 
-Hermes uses a two-phase protocol to ensure all nodes maintain consistent data:
+Hermes uses a simplified protocol for testing that focuses on direct validation of writes:
 
-1. **Invalidation Phase**
-   - Writing node sends invalidation messages for specific keys
-   - All nodes must acknowledge invalidations
-   - Prevents stale reads during updates
+1. **Write Protocol**
+   - Coordinator determines replica set for key
+   - Sends validation messages to all replicas
+   - Waits for acknowledgments from all replicas
+   - Updates local data after successful validation
 
-2. **Data Transmission Phase**
-   - After receiving all ACKs, writer sends new data
-   - Data transmitted only to nodes that acknowledged invalidation
-   - Ensures all nodes have consistent view of data
+2. **Read Protocol**
+   - Node checks if it's a replica for the key
+   - Returns local value if valid
+   - If local copy invalid/missing, fetches from another replica
+   - Updates local copy with fetched value
 
-## Key Features
+## Detailed Operation Flows
 
-- **Strong Consistency**: Sequential consistency guarantees with no stale reads
-- **Network Efficient**: Minimizes data transmission through targeted invalidations
-- **High Performance**: Optimized for in-memory operations
-- **Fault Tolerant**: Handles node failures and network partitions
+### Write Flow
+1. Client initiates write to any node
+2. Node checks if it's a replica for the key
+3. If yes:
+   - Generates new version number
+   - Sends validation messages to all other replicas
+   - Waits for ValidationAck from each replica
+   - Updates local data after all acks received
+4. If no:
+   - Returns error "not responsible for key"
 
-## Use Cases
+### Read Flow
+1. Client initiates read to any node
+2. Node checks if it's a replica for the key
+3. If yes:
+   - Returns local value if present and valid
+   - If value missing/invalid:
+     - Finds another replica
+     - Requests value from that replica
+     - Updates local copy
+     - Returns value to client
+4. If no:
+   - Returns error "not responsible for key"
 
-- Distributed caching systems
-- In-memory databases
-- High-performance distributed storage
-- Systems requiring strong consistency guarantees
+## Implementation Details
 
-## Benefits
+### Node States
+- Active: Node is functioning normally
+- Inactive: Node is temporarily unavailable
 
-- Lower network bandwidth usage compared to traditional protocols
-- Reduced latency through optimized two-phase approach
-- Strong consistency without sacrificing performance
-- Scalable to large number of nodes
+### Message Types
+- Validation: Contains new key-value pair and version
+- ValidationAck: Confirms successful validation
+- ReadRequest: Requests value for key
+- ReadResponse: Returns value and version
+- JoinRequest/Response: Handles cluster membership
 
-## Implementation Requirements
+## Testing
 
-- Reliable network communication between nodes
-- Membership management system
-- Failure detection mechanism
-- State management for tracking invalidations
+The implementation includes unit tests for:
+- Node creation and state management
+- Version number management
+- Replica selection
+- Integration tests for multi-node operations
+
+## Future Improvements
+- Implement full invalidation phase
+- Add persistent storage
+- Improve replica selection with consistent hashing
+- Add failure recovery mechanisms
 
 ## References
-
 - [Original Hermes Paper](https://www.usenix.org/system/files/nsdi20-paper-katsarakis.pdf)
-- [ACM SIGOPS Operating Systems Review](https://dl.acm.org/doi/10.1145/3373376.3378468)

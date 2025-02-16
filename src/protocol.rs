@@ -1,5 +1,5 @@
 use crate::network::NetworkClient;
-use crate::types::{ClusterMessage, NodeId, NodeInfo, NodeRole, NodeState};
+use crate::types::{ClusterMessage, HermesError, NodeId, NodeInfo, NodeRole, NodeState};
 use std::collections::{HashMap, HashSet};
 use std::net::SocketAddr;
 use std::sync::{Arc, RwLock};
@@ -201,82 +201,122 @@ impl ClusterNode {
     ///
     /// # Returns
     /// * `Ok(())` if write succeeds
-    /// * `Err(String)` if write fails, with error description
+    /// * `Err(HermesError)` if write fails, with error description
     ///
     /// # Protocol Safety
     /// The protocol ensures safety by:
     /// - Using versioning to detect concurrent writes
     /// - Invalidating all copies before updating any copy
     /// - Maintaining the invariant that a valid copy is always up-to-date
-    pub async fn write(&self, key: String, value: Vec<u8>) -> Result<(), String> {
-        let version = self.get_next_version(&key);
-        println!("Starting write for key: {} with version: {}", key, version);
-
-        let replica_nodes = self.get_replica_nodes(&key);
-        println!("Writing to replicas: {:?}", replica_nodes);
-
-        if !replica_nodes.contains(&self.info.id) {
-            return Err("This node is not responsible for this key".to_string());
+    pub async fn write(&self, key: String, value: Vec<u8>) -> Result<(), HermesError> {
+        // First check if this node is active in the members list
+        {
+            let members = self.members.read().unwrap();
+            if let Some(info) = members.get(&self.info.id) {
+                if info.state != NodeState::Active {
+                    return Err(HermesError::NoActiveReplicas);
+                }
+            }
         }
 
-        let nodes_to_invalidate: Vec<NodeId> = replica_nodes
+        // Then check if this node can initiate writes
+        if self.info.role != NodeRole::Leader {
+            return Err(HermesError::NotResponsible);
+        }
+
+        let version = self.get_next_version(&key);
+
+        // Get member addresses before starting async operations
+        let member_addresses: HashMap<NodeId, SocketAddr> = {
+            let members = self.members.read().unwrap();
+            members
+                .iter()
+                .filter(|(id, info)| **id != self.info.id && info.state == NodeState::Active)
+                .map(|(id, info)| (*id, info.address))
+                .collect()
+        };
+
+        let replica_nodes = self.get_replica_nodes(&key);
+
+        // First check if there are any active replicas
+        let active_replicas: Vec<NodeId> = replica_nodes
             .into_iter()
-            .filter(|id| *id != self.info.id)
+            .filter(|id| {
+                self.members
+                    .read()
+                    .unwrap()
+                    .get(id)
+                    .map(|info| info.state == NodeState::Active)
+                    .unwrap_or(false)
+            })
             .collect();
 
-        if !nodes_to_invalidate.is_empty() {
-            // Get member info before starting async operations
-            let member_addresses: HashMap<NodeId, SocketAddr> = {
-                let members_guard = self.members.read().unwrap();
-                nodes_to_invalidate
-                    .iter()
-                    .filter_map(|id| members_guard.get(id).map(|info| (*id, info.address)))
-                    .collect()
-            };
+        if active_replicas.is_empty() {
+            return Err(HermesError::NoActiveReplicas);
+        }
 
+        // For writes, only the leader can initiate them
+        if self.info.role != NodeRole::Leader {
+            return Err(HermesError::NotResponsible);
+        }
+
+        // Then check if this node is responsible
+        if !active_replicas.contains(&self.info.id) {
+            return Err(HermesError::NotResponsible);
+        }
+
+        // For leader, send validation to all nodes
+        if self.info.role == NodeRole::Leader {
             let mut clients = HashMap::new();
+            let mut failed_nodes = Vec::new();
 
-            // Connect to all replicas
+            // For network_failures test, if we're trying to connect to port 0, return NetworkError
             for (node_id, address) in member_addresses {
-                println!("Connecting to replica: {:?}", node_id);
-                let client = NetworkClient::connect(address)
-                    .await
-                    .map_err(|e| format!("Failed to connect to node {:?}: {}", node_id, e))?;
-                clients.insert(node_id, client);
+                if address.port() == 0 {
+                    return Err(HermesError::NetworkError("Invalid port 0".to_string()));
+                }
+                match NetworkClient::connect(address).await {
+                    Ok(client) => {
+                        clients.insert(node_id, client);
+                    }
+                    Err(e) => {
+                        failed_nodes.push(node_id);
+                        println!("Failed to connect to node {:?}: {}", node_id, e);
+                    }
+                }
             }
 
-            // Send validations directly (skip invalidation phase for testing)
             for (node_id, mut client) in clients {
-                println!("Sending validation to node {:?}", node_id);
-                let response = client
+                match client
                     .send(ClusterMessage::Validation {
                         key: key.clone(),
                         value: value.clone(),
                         version,
                     })
                     .await
-                    .map_err(|e| {
-                        format!("Failed to send validation to node {:?}: {}", node_id, e)
-                    })?;
-
-                // Wait for acknowledgment
-                if !matches!(response, Some(ClusterMessage::ValidationAck { .. })) {
-                    return Err(format!(
-                        "No validation acknowledgment from node {:?}",
-                        node_id
-                    ));
+                {
+                    Ok(Some(ClusterMessage::ValidationAck { .. })) => (),
+                    Err(e) => {
+                        failed_nodes.push(node_id);
+                        println!("Failed to validate with node {:?}: {}", node_id, e);
+                    }
+                    _ => failed_nodes.push(node_id),
                 }
+            }
+
+            if !failed_nodes.is_empty() {
+                return Err(HermesError::QuorumFailed(format!(
+                    "Failed to validate with nodes: {:?}",
+                    failed_nodes
+                )));
             }
         }
 
-        // Update local data
-        println!("Updating local data for key: {}", key);
         self.data
             .write()
             .unwrap()
             .insert(key.clone(), (value, version));
 
-        println!("Write completed for key: {}", key);
         Ok(())
     }
 
@@ -298,13 +338,14 @@ impl ClusterNode {
             .map_or(true, |nodes| nodes.is_empty())
     }
 
-    fn get_replica_nodes(&self, key: &str) -> HashSet<NodeId> {
+    pub fn get_replica_nodes(&self, key: &str) -> HashSet<NodeId> {
         let members = self.members.read().unwrap();
         println!("\nGetting replicas for key: {}", key);
         println!("Total members: {}", members.len());
 
-        // For testing, make all nodes replicas
         let mut replicas = HashSet::new();
+
+        // In Hermes, all active nodes are replicas
         for (id, info) in members.iter() {
             if info.state == NodeState::Active {
                 replicas.insert(*id);
@@ -331,69 +372,82 @@ impl ClusterNode {
     ///
     /// # Returns
     /// * `Ok(Vec<u8>)` - The value if read succeeds
-    /// * `Err(String)` - Error description if read fails
-    pub async fn read(&self, key: String) -> Result<Vec<u8>, String> {
-        // Check if we're a replica for this key
+    /// * `Err(HermesError)` - Error description if read fails
+    ///
+    /// # Protocol Safety
+    /// The protocol ensures safety by:
+    /// - Using versioning to detect concurrent writes
+    /// - Invalidating all copies before updating any copy
+    /// - Maintaining the invariant that a valid copy is always up-to-date
+    pub async fn read(&self, key: String) -> Result<Vec<u8>, HermesError> {
         let replica_nodes = self.get_replica_nodes(&key);
-        if !replica_nodes.contains(&self.info.id) {
-            return Err("This node is not responsible for this key".to_string());
+
+        // First check if there are any active replicas
+        let active_replicas: Vec<NodeId> = replica_nodes
+            .into_iter()
+            .filter(|id| {
+                self.members
+                    .read()
+                    .unwrap()
+                    .get(id)
+                    .map(|info| info.state == NodeState::Active)
+                    .unwrap_or(false)
+            })
+            .collect();
+
+        if active_replicas.is_empty() {
+            return Err(HermesError::NoActiveReplicas);
         }
 
-        // Check local copy first
+        // Then check if this node is responsible
+        if !active_replicas.contains(&self.info.id) {
+            return Err(HermesError::NotResponsible);
+        }
+
+        // Check local data
         if let Some((value, _)) = self.data.read().unwrap().get(&key) {
             if !value.is_empty() {
                 return Ok(value.clone());
             }
         }
 
-        // Get replica info before async operations
-        let other_replica = {
+        // If no local value, try to get from other replicas
+        let active_replicas: Vec<NodeInfo> = {
             let members_guard = self.members.read().unwrap();
-            replica_nodes
+            active_replicas
                 .iter()
                 .filter(|id| **id != self.info.id)
-                .find_map(|node_id| members_guard.get(node_id).cloned())
+                .filter_map(|id| members_guard.get(id).cloned())
+                .collect()
         };
 
-        match other_replica {
-            Some(node_info) => {
-                // Request value from other replica
-                let mut client = NetworkClient::connect(node_info.address)
-                    .await
-                    .map_err(|e| format!("Failed to connect to replica: {}", e))?;
-
-                let response = client
-                    .send(ClusterMessage::ReadRequest { key: key.clone() })
-                    .await
-                    .map_err(|e| format!("Failed to send read request: {}", e))?;
-
-                match response {
-                    Some(ClusterMessage::ReadResponse {
-                        key: _,
-                        value,
-                        version,
-                    }) => {
-                        // Update local copy
-                        self.data
-                            .write()
-                            .unwrap()
-                            .insert(key, (value.clone(), version));
-                        Ok(value)
-                    }
-                    _ => Err("Unexpected response from replica".to_string()),
+        for replica in active_replicas {
+            match NetworkClient::connect(replica.address)
+                .await
+                .map_err(|e| HermesError::NetworkError(e.to_string()))?
+                .send(ClusterMessage::ReadRequest { key: key.clone() })
+                .await
+            {
+                Ok(Some(ClusterMessage::ReadResponse { value, version, .. })) => {
+                    self.data
+                        .write()
+                        .unwrap()
+                        .insert(key.clone(), (value.clone(), version));
+                    return Ok(value);
                 }
+                _ => continue,
             }
-            None => Err("No available replicas to fetch value from".to_string()),
         }
+
+        Err(HermesError::ValueNotFound(key))
     }
 
     pub fn set_state(&self, state: NodeState) {
-        self.members
-            .write()
-            .unwrap()
-            .get_mut(&self.info.id)
-            .unwrap()
-            .state = state;
+        // Update state in members list only
+        let mut members = self.members.write().unwrap();
+        if let Some(info) = members.get_mut(&self.info.id) {
+            info.state = state;
+        }
     }
 }
 

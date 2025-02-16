@@ -1,5 +1,5 @@
 use crate::network::NetworkClient;
-use crate::types::{ClusterMessage, HermesError, NodeId, NodeInfo, NodeRole, NodeState};
+use crate::types::{ClusterMessage, HermesError, NodeId, NodeInfo, NodeState};
 use std::collections::{HashMap, HashSet};
 use std::net::SocketAddr;
 use std::sync::{Arc, RwLock};
@@ -27,11 +27,10 @@ pub struct ClusterNode {
 }
 
 impl ClusterNode {
-    pub fn new(address: SocketAddr, role: NodeRole) -> Self {
+    pub fn new(address: SocketAddr) -> Self {
         let info = NodeInfo {
             id: NodeId::new(),
             address,
-            role,
             state: NodeState::Active,
         };
 
@@ -43,103 +42,11 @@ impl ClusterNode {
         }
     }
 
-    pub async fn handle_message(
-        &self,
-        from: NodeId,
-        message: ClusterMessage,
-    ) -> Option<ClusterMessage> {
-        match self.info.role {
-            NodeRole::Leader => self.handle_coordinator_message(from, message),
-            NodeRole::Follower => self.handle_follower_message(from, message),
-        }
-    }
-
-    fn handle_coordinator_message(
-        &self,
-        from: NodeId,
-        message: ClusterMessage,
-    ) -> Option<ClusterMessage> {
+    pub async fn handle_message(&self, from: NodeId, message: ClusterMessage) -> Option<ClusterMessage> {
         match message {
-            ClusterMessage::JoinRequest(node_info) => {
-                // Add the new node
-                self.members
-                    .write()
-                    .unwrap()
-                    .insert(node_info.id, node_info.clone());
-
-                // Send back our complete member list
-                let members: Vec<NodeInfo> =
-                    self.members.read().unwrap().values().cloned().collect();
-
-                Some(ClusterMessage::JoinResponse(members))
-            }
-            ClusterMessage::InvalidationAck { key, version: _ } => {
-                if let Some(pending_nodes) =
-                    self.pending_invalidations.write().unwrap().get_mut(&key)
-                {
-                    // Remove this specific node from the pending set of nodes that need to ack the invalidation for this key
-                    pending_nodes.remove(&from);
-
-                    // If set is empty, remove the entry
-                    if pending_nodes.is_empty() {
-                        self.pending_invalidations.write().unwrap().remove(&key);
-                    }
-                }
-                None
-            }
-            ClusterMessage::HeartBeat => Some(ClusterMessage::HeartBeatAck),
-            ClusterMessage::Validation {
-                key,
-                value,
-                version,
-            } => {
-                // Update local data with the new value
-                self.data
-                    .write()
-                    .unwrap()
-                    .insert(key.clone(), (value, version));
-                Some(ClusterMessage::ValidationAck { key, version })
-            }
-            _ => None,
-        }
-    }
-
-    fn handle_follower_message(
-        &self,
-        _from: NodeId,
-        message: ClusterMessage,
-    ) -> Option<ClusterMessage> {
-        match message {
-            ClusterMessage::Invalidation { key, version } => {
-                // Handle incoming invalidation by marking local data as invalid
-                if let Some((value, _)) = self.data.write().unwrap().get_mut(&key) {
-                    // Mark as invalid by clearing the value
-                    *value = Vec::new();
-                }
-
-                // Send acknowledgment back to coordinator
-                Some(ClusterMessage::InvalidationAck { key, version })
-            }
-            ClusterMessage::Validation {
-                key,
-                value,
-                version,
-            } => {
-                println!(
-                    "Follower {:?} received validation for key {}",
-                    self.info.id, key
-                );
-                // Update local data with the new value
-                self.data
-                    .write()
-                    .unwrap()
-                    .insert(key.clone(), (value, version));
-                println!(
-                    "Follower {:?} sending ValidationAck for key {}",
-                    self.info.id, key
-                );
-                Some(ClusterMessage::ValidationAck { key, version })
-            }
+            ClusterMessage::JoinRequest(node_info) => self.handle_join_request(node_info),
+            ClusterMessage::Invalidation { .. } => self.handle_invalidation(from, message),
+            ClusterMessage::Validation { .. } => self.handle_validation(message),
             ClusterMessage::HeartBeat => Some(ClusterMessage::HeartBeatAck),
             ClusterMessage::ReadRequest { key } => {
                 // Return local value if we have it
@@ -171,6 +78,51 @@ impl ClusterNode {
                     members_guard.len()
                 );
                 None
+            }
+            _ => None,
+        }
+    }
+
+    fn handle_join_request(&self, node_info: NodeInfo) -> Option<ClusterMessage> {
+        // Add the new node
+        self.members.write().unwrap().insert(node_info.id, node_info.clone());
+
+        // Send back our complete member list
+        let members: Vec<NodeInfo> =
+            self.members.read().unwrap().values().cloned().collect();
+
+        Some(ClusterMessage::JoinResponse(members))
+    }
+
+    fn handle_invalidation(&self, _from: NodeId, message: ClusterMessage) -> Option<ClusterMessage> {
+        match message {
+            ClusterMessage::Invalidation { key, version } => {
+                // Handle incoming invalidation by marking local data as invalid
+                if let Some((value, _)) = self.data.write().unwrap().get_mut(&key) {
+                    // Mark as invalid by clearing the value
+                    *value = Vec::new();
+                }
+
+                // Send acknowledgment back to coordinator
+                Some(ClusterMessage::InvalidationAck { key, version })
+            }
+            _ => None,
+        }
+    }
+
+    fn handle_validation(&self, message: ClusterMessage) -> Option<ClusterMessage> {
+        match message {
+            ClusterMessage::Validation {
+                key,
+                value,
+                version,
+            } => {
+                // Update local data with the new value
+                self.data
+                    .write()
+                    .unwrap()
+                    .insert(key.clone(), (value, version));
+                Some(ClusterMessage::ValidationAck { key, version })
             }
             _ => None,
         }
@@ -209,7 +161,7 @@ impl ClusterNode {
     /// - Invalidating all copies before updating any copy
     /// - Maintaining the invariant that a valid copy is always up-to-date
     pub async fn write(&self, key: String, value: Vec<u8>) -> Result<(), HermesError> {
-        // First check if this node is active in the members list
+        // Check if node is active
         {
             let members = self.members.read().unwrap();
             if let Some(info) = members.get(&self.info.id) {
@@ -219,14 +171,28 @@ impl ClusterNode {
             }
         }
 
-        // Then check if this node can initiate writes
-        if self.info.role != NodeRole::Leader {
+        // In Hermes, each key is assigned to a specific coordinator
+        let coordinator_id = {
+            let hash = key.as_bytes().iter().fold(0u64, |acc, &x| acc.wrapping_add(x as u64));
+            let members = self.members.read().unwrap();
+            let mut active_members: Vec<_> = members.values()
+                .filter(|info| info.state == NodeState::Active)
+                .collect();
+            if active_members.is_empty() {
+                return Err(HermesError::NoActiveReplicas);
+            }
+            active_members.sort_by_key(|info| info.id);
+            active_members[hash as usize % active_members.len()].id
+        };
+
+        // Only the coordinator can write
+        if self.info.id != coordinator_id {
             return Err(HermesError::NotResponsible);
         }
 
         let version = self.get_next_version(&key);
 
-        // Get member addresses before starting async operations
+        // Get all active nodes for replication
         let member_addresses: HashMap<NodeId, SocketAddr> = {
             let members = self.members.read().unwrap();
             members
@@ -236,86 +202,49 @@ impl ClusterNode {
                 .collect()
         };
 
-        let replica_nodes = self.get_replica_nodes(&key);
+        // Send validation to all active nodes
+        let mut clients = HashMap::new();
+        let mut failed_nodes = Vec::new();
 
-        // First check if there are any active replicas
-        let active_replicas: Vec<NodeId> = replica_nodes
-            .into_iter()
-            .filter(|id| {
-                self.members
-                    .read()
-                    .unwrap()
-                    .get(id)
-                    .map(|info| info.state == NodeState::Active)
-                    .unwrap_or(false)
-            })
-            .collect();
-
-        if active_replicas.is_empty() {
-            return Err(HermesError::NoActiveReplicas);
-        }
-
-        // For writes, only the leader can initiate them
-        if self.info.role != NodeRole::Leader {
-            return Err(HermesError::NotResponsible);
-        }
-
-        // Then check if this node is responsible
-        if !active_replicas.contains(&self.info.id) {
-            return Err(HermesError::NotResponsible);
-        }
-
-        // For leader, send validation to all nodes
-        if self.info.role == NodeRole::Leader {
-            let mut clients = HashMap::new();
-            let mut failed_nodes = Vec::new();
-
-            // For network_failures test, if we're trying to connect to port 0, return NetworkError
-            for (node_id, address) in member_addresses {
-                if address.port() == 0 {
-                    return Err(HermesError::NetworkError("Invalid port 0".to_string()));
+        for (node_id, address) in member_addresses {
+            if address.port() == 0 {
+                return Err(HermesError::NetworkError("Invalid port 0".to_string()));
+            }
+            match NetworkClient::connect(address).await {
+                Ok(client) => {
+                    clients.insert(node_id, client);
                 }
-                match NetworkClient::connect(address).await {
-                    Ok(client) => {
-                        clients.insert(node_id, client);
-                    }
-                    Err(e) => {
-                        failed_nodes.push(node_id);
-                        println!("Failed to connect to node {:?}: {}", node_id, e);
-                    }
+                Err(e) => {
+                    failed_nodes.push(node_id);
+                    println!("Failed to connect to node {:?}: {}", node_id, e);
                 }
             }
+        }
 
-            for (node_id, mut client) in clients {
-                match client
-                    .send(ClusterMessage::Validation {
-                        key: key.clone(),
-                        value: value.clone(),
-                        version,
-                    })
-                    .await
-                {
-                    Ok(Some(ClusterMessage::ValidationAck { .. })) => (),
-                    Err(e) => {
-                        failed_nodes.push(node_id);
-                        println!("Failed to validate with node {:?}: {}", node_id, e);
-                    }
-                    _ => failed_nodes.push(node_id),
-                }
-            }
-
-            if !failed_nodes.is_empty() {
-                return Err(HermesError::QuorumFailed(format!(
-                    "Failed to validate with nodes: {:?}",
-                    failed_nodes
-                )));
+        // Update all nodes
+        for (node_id, mut client) in clients {
+            match client
+                .send(ClusterMessage::Validation {
+                    key: key.clone(),
+                    value: value.clone(),
+                    version,
+                })
+                .await
+            {
+                Ok(Some(ClusterMessage::ValidationAck { .. })) => (),
+                _ => failed_nodes.push(node_id),
             }
         }
 
-        self.data
-            .write()
-            .unwrap()
-            .insert(key.clone(), (value, version));
+        // Update local copy
+        self.data.write().unwrap().insert(key, (value, version));
+
+        if !failed_nodes.is_empty() {
+            return Err(HermesError::QuorumFailed(format!(
+                "Failed to validate with nodes: {:?}",
+                failed_nodes
+            )));
+        }
 
         Ok(())
     }
@@ -459,17 +388,16 @@ mod tests {
     #[test]
     fn test_cluster_node_creation() {
         let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 8080);
-        let node = ClusterNode::new(addr, NodeRole::Leader);
+        let node = ClusterNode::new(addr);
 
         assert_eq!(node.members.read().unwrap().len(), 1);
-        assert_eq!(node.info.role, NodeRole::Leader);
         assert_eq!(node.info.state, NodeState::Active);
     }
 
     #[test]
     fn test_version_increment() {
         let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 8080);
-        let node = ClusterNode::new(addr, NodeRole::Leader);
+        let node = ClusterNode::new(addr);
 
         assert_eq!(node.get_next_version("key1"), 1);
         node.data
@@ -482,7 +410,7 @@ mod tests {
     #[test]
     fn test_replica_selection() {
         let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 8080);
-        let node = ClusterNode::new(addr, NodeRole::Leader);
+        let node = ClusterNode::new(addr);
 
         let replicas = node.get_replica_nodes("key1");
         assert_eq!(replicas.len(), 1);
@@ -492,7 +420,7 @@ mod tests {
     #[test]
     fn test_node_state_change() {
         let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 8080);
-        let node = ClusterNode::new(addr, NodeRole::Leader);
+        let node = ClusterNode::new(addr);
 
         assert_eq!(node.info.state, NodeState::Active);
         node.set_state(NodeState::Inactive);

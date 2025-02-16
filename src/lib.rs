@@ -16,13 +16,12 @@
 //! # Basic Usage
 //!
 //! ```rust
-//! use hermes_replication::{ClusterNode, NodeRole};
+//! use hermes_replication::ClusterNode;
 //! use std::net::SocketAddr;
 //!
-//! // Create a leader node
+//! // Create a node
 //! let node = ClusterNode::new(
-//!     "127.0.0.1:8080".parse().unwrap(),
-//!     NodeRole::Leader
+//!     "127.0.0.1:8080".parse().unwrap()
 //! );
 //!
 //! // Write and read data
@@ -40,4 +39,4 @@ pub mod types;
 
 // Re-export only what's needed by external users
 pub use protocol::ClusterNode;
-pub use types::{ClusterMessage, HermesError, NodeInfo, NodeRole, NodeState};
+pub use types::{ClusterMessage, HermesError, NodeInfo, NodeState};

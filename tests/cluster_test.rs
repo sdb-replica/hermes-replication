@@ -201,3 +201,55 @@ async fn test_hermes_protocol() -> Result<(), Box<dyn std::error::Error + Send +
 
     Ok(())
 }
+
+#[tokio::test]
+async fn test_concurrent_writes() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let cluster = setup_test_cluster(9081).await;
+
+    // Find coordinator for test key
+    let test_key = "concurrent_key".to_string();
+    let hash = test_key.as_bytes().iter().fold(0u64, |acc, &x| acc.wrapping_add(x as u64));
+    let members = cluster.node1.members.read().unwrap();
+    let mut active_members: Vec<_> = members.values().collect();
+    active_members.sort_by_key(|info| info.id);
+    let coordinator_id = active_members[hash as usize % active_members.len()].id;
+
+    // Get coordinator
+    let coordinator = if coordinator_id == cluster.node1.info.id {
+        &cluster.node1
+    } else if coordinator_id == cluster.node2.info.id {
+        &cluster.node2
+    } else {
+        &cluster.node3
+    };
+
+    // Spawn concurrent writes
+    let key = test_key.clone();
+    let coord = Arc::clone(coordinator);
+    let write1 = tokio::spawn(async move {
+        coord.write(key, b"value1".to_vec()).await
+    });
+
+    let key = test_key.clone();
+    let coord = Arc::clone(coordinator);
+    let write2 = tokio::spawn(async move {
+        coord.write(key, b"value2".to_vec()).await
+    });
+
+    // Wait for both writes to complete
+    let _ = tokio::try_join!(write1, write2)?;
+
+    // Read from all nodes to verify consistency
+    let val1 = cluster.node1.read(test_key.clone()).await?;
+    let val2 = cluster.node2.read(test_key.clone()).await?;
+    let val3 = cluster.node3.read(test_key.clone()).await?;
+
+    // Assert all nodes have the same value
+    assert_eq!(val1, val2);
+    assert_eq!(val2, val3);
+    
+    // Assert the value is either "value1" or "value2"
+    assert!(val1 == b"value1" || val1 == b"value2");
+
+    Ok(())
+}

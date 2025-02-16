@@ -59,11 +59,30 @@ Hermes uses a simplified protocol for testing that focuses on direct validation 
 
 ## Testing
 
-The implementation includes unit tests for:
-- Node creation and state management
-- Version number management
-- Replica selection
-- Integration tests for multi-node operations
+### Cluster Tests (tests/cluster_test.rs)
+- Multi-node cluster setup
+- Write/read operations
+- Node state changes
+- Membership changes
+
+### Failure Tests (tests/failure_test.rs)
+- Write failures (NotResponsible, NoActiveReplicas)
+- Read failures (ValueNotFound)
+- Network failures
+- Quorum failures
+
+## Implementation Status
+
+✅ Basic replication protocol
+✅ Decentralized write coordination
+✅ Local reads from valid copies
+✅ Error handling
+✅ Network communication
+✅ Test coverage
+⏳ Persistence (TODO)
+⏳ Node recovery (TODO)
+⏳ Consistent hashing for replica selection (TODO)
+⏳ Full invalidation phase (TODO)
 
 ## Future Improvements
 - Implement full invalidation phase

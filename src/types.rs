@@ -17,22 +17,6 @@ use uuid::Uuid;
     rkyv::Serialize,
 )]
 #[archive_attr(derive(Debug, PartialEq))]
-pub enum NodeRole {
-    Leader,
-    Follower,
-}
-
-#[derive(
-    Debug,
-    Clone,
-    serde::Serialize,
-    serde::Deserialize,
-    PartialEq,
-    rkyv::Archive,
-    rkyv::Deserialize,
-    rkyv::Serialize,
-)]
-#[archive_attr(derive(Debug, PartialEq))]
 pub enum NodeState {
     Active,
     Inactive,
@@ -94,7 +78,6 @@ pub enum ClusterMessage {
 pub struct NodeInfo {
     pub id: NodeId,
     pub address: SocketAddr,
-    pub role: NodeRole,
     pub state: NodeState,
 }
 

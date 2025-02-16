@@ -1,80 +1,83 @@
 # Hermes Replication Protocol
 
-Hermes is a high-performance, strongly-consistent replication protocol designed for distributed in-memory systems. It provides sequential consistency while optimizing for low latency and network efficiency.
+A Rust implementation of a distributed replication protocol providing:
+- Strong consistency (linearizability)
+- High availability through replication
+- Low latency local reads
+- Decentralized peer-to-peer architecture
 
 ## Overview
 
-Hermes uses a simplified protocol for testing that focuses on direct validation of writes:
+```rust
+use hermes_replication::ClusterNode;
+use std::net::SocketAddr;
 
-1. **Write Protocol**
-   - Coordinator determines replica set for key
-   - Sends validation messages to all replicas
-   - Waits for acknowledgments from all replicas
-   - Updates local data after successful validation
+// Create a node
+let node = ClusterNode::new(
+    "127.0.0.1:8080".parse().unwrap()
+);
 
-2. **Read Protocol**
-   - Node checks if it's a replica for the key
-   - Returns local value if valid
-   - If local copy invalid/missing, fetches from another replica
-   - Updates local copy with fetched value
+// Write and read data
+async {
+    node.write("key".to_string(), b"value".to_vec()).await?;
+    let value = node.read("key".to_string()).await?;
+    assert_eq!(value, b"value");
+};
+```
 
-## Detailed Operation Flows
+## Protocol Details
 
-### Write Flow
-1. Client initiates write to any node
-2. Node checks if it's a replica for the key
-3. If yes:
-   - Generates new version number
-   - Sends validation messages to all other replicas
-   - Waits for ValidationAck from each replica
-   - Updates local data after all acks received
-4. If no:
-   - Returns error "not responsible for key"
+### Write Protocol
+1. Coordinator Selection:
+   - Each key maps to a specific coordinator node
+   - Mapping uses consistent hashing of the key
+   - Any node can be coordinator for different keys
 
-### Read Flow
-1. Client initiates read to any node
-2. Node checks if it's a replica for the key
-3. If yes:
-   - Returns local value if present and valid
-   - If value missing/invalid:
-     - Finds another replica
-     - Requests value from that replica
-     - Updates local copy
-     - Returns value to client
-4. If no:
-   - Returns error "not responsible for key"
+2. Write operation flow:
+   - Node checks if it's coordinator for the key
+   - Coordinator sends validation to all active replicas
+   - Updates local copy after successful validation
+   - Write completes when all replicas acknowledge
 
-## Implementation Details
+### Read Protocol
+1. Any active node can serve reads if:
+   - Node has valid local copy
+   - Node is in active replica set
+2. If local copy invalid:
+   - Fetch from other replicas
+   - Update local copy
+   - Serve read
 
 ### Node States
-- Active: Node is functioning normally
-- Inactive: Node is temporarily unavailable
+- Active: Node can participate in operations
+- Inactive: Node cannot participate in operations
+- Suspected: Node is potentially unhealthy (not fully implemented)
 
-### Message Types
-- Validation: Contains new key-value pair and version
-- ValidationAck: Confirms successful validation
-- ReadRequest: Requests value for key
-- ReadResponse: Returns value and version
-- JoinRequest/Response: Handles cluster membership
+### Error Handling
+- NotResponsible: Node is not coordinator for key
+- NoActiveReplicas: No active nodes available
+- NetworkError: Communication failure
+- QuorumFailed: Failed to reach required replicas
+- ValueNotFound: Key does not exist
 
 ## Testing
 
-### Cluster Tests (tests/cluster_test.rs)
+### Cluster Tests
 - Multi-node cluster setup
 - Write/read operations
 - Node state changes
 - Membership changes
 
-### Failure Tests (tests/failure_test.rs)
-- Write failures (NotResponsible, NoActiveReplicas)
-- Read failures (ValueNotFound)
+### Failure Tests
+- Write coordination failures
+- Read failures
 - Network failures
 - Quorum failures
 
 ## Implementation Status
 
 ✅ Basic replication protocol
-✅ Decentralized write coordination
+✅ Key-based coordinator selection
 ✅ Local reads from valid copies
 ✅ Error handling
 ✅ Network communication
@@ -83,12 +86,6 @@ Hermes uses a simplified protocol for testing that focuses on direct validation 
 ⏳ Node recovery (TODO)
 ⏳ Consistent hashing for replica selection (TODO)
 ⏳ Full invalidation phase (TODO)
-
-## Future Improvements
-- Implement full invalidation phase
-- Add persistent storage
-- Improve replica selection with consistent hashing
-- Add failure recovery mechanisms
 
 ## References
 - [Original Hermes Paper](https://www.usenix.org/system/files/nsdi20-paper-katsarakis.pdf)

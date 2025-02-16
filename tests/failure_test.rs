@@ -1,5 +1,5 @@
 mod test_utils;
-use hermes_replication::types::{HermesError, NodeRole, NodeState};
+use hermes_replication::types::{HermesError, NodeState};
 use hermes_replication::{network::NetworkServer, ClusterNode};
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::sync::Arc;
@@ -30,8 +30,7 @@ async fn test_write_failures() -> Result<(), Box<dyn std::error::Error + Send + 
 #[tokio::test]
 async fn test_read_failures() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let node1 = Arc::new(ClusterNode::new(
-        SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 7081),
-        NodeRole::Leader,
+        SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 7081)
     ));
 
     // Test 1: Read non-existent key
@@ -50,14 +49,12 @@ async fn test_read_failures() -> Result<(), Box<dyn std::error::Error + Send + S
 async fn test_network_failures() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     // Create leader node with valid port
     let node1 = Arc::new(ClusterNode::new(
-        SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 7081),
-        NodeRole::Leader,
+        SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 7081)
     ));
 
     // Create follower node with invalid port to simulate network failure
     let node2 = Arc::new(ClusterNode::new(
-        SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 0),
-        NodeRole::Follower,
+        SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 0)
     ));
 
     // Add follower to leader's member list
@@ -81,12 +78,10 @@ async fn test_network_failures() -> Result<(), Box<dyn std::error::Error + Send 
 #[tokio::test]
 async fn test_quorum_failures() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let node1 = Arc::new(ClusterNode::new(
-        SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 7091),
-        NodeRole::Leader,
+        SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 7091)
     ));
     let node2 = Arc::new(ClusterNode::new(
-        SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 7092),
-        NodeRole::Follower,
+        SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 7092)
     ));
 
     // Start only node1

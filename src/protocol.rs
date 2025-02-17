@@ -392,6 +392,18 @@ impl ClusterNode {
             info.state = state;
         }
     }
+
+    pub fn get_version(&self, key: &[u8]) -> Option<u64> {
+        self.data
+            .read()
+            .unwrap()
+            .get(key)
+            .map(|(_, version)| *version)
+    }
+
+    pub fn get_value_and_version(&self, key: &[u8]) -> Option<(Vec<u8>, u64)> {
+        self.data.read().unwrap().get(key).cloned()
+    }
 }
 
 #[cfg(test)]

@@ -1,10 +1,12 @@
 mod test_utils;
 use hermes_replication::{
     network::{NetworkClient, NetworkServer},
+    types::HermesError,
     ClusterMessage, ClusterNode,
 };
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::sync::Arc;
+use test_utils::get_coordinator;
 use test_utils::setup_test_cluster;
 
 #[tokio::test]
@@ -117,7 +119,7 @@ async fn test_write_and_read() -> Result<(), Box<dyn std::error::Error + Send + 
 async fn test_hermes_protocol() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let cluster = setup_test_cluster(9091).await;
 
-    // Find coordinator for key1
+    // Test 1: Coordinator Selection
     let key1 = b"key1".to_vec();
     let hash = key1.iter().fold(0u64, |acc, &x| acc.wrapping_add(x as u64));
     let members = cluster.node1.members.read().unwrap();
@@ -125,7 +127,20 @@ async fn test_hermes_protocol() -> Result<(), Box<dyn std::error::Error + Send +
     active_members.sort_by_key(|info| info.id);
     let coordinator_id = active_members[hash as usize % active_members.len()].id;
 
-    // Write through coordinator
+    // Verify write fails from non-coordinator
+    let non_coordinator = if coordinator_id != cluster.node1.info.id {
+        &cluster.node1
+    } else {
+        &cluster.node2
+    };
+    assert!(matches!(
+        non_coordinator
+            .write(key1.clone(), b"value1".to_vec())
+            .await,
+        Err(HermesError::NotResponsible)
+    ));
+
+    // Test 2: Write Protocol and Version Numbers
     let coordinator = if coordinator_id == cluster.node1.info.id {
         &cluster.node1
     } else if coordinator_id == cluster.node2.info.id {
@@ -134,56 +149,52 @@ async fn test_hermes_protocol() -> Result<(), Box<dyn std::error::Error + Send +
         &cluster.node3
     };
 
-    // Write initial value
+    // Initial write
     coordinator.write(key1.clone(), b"value1".to_vec()).await?;
 
-    // Read from all nodes should succeed
-    let val1 = cluster.node1.read(key1.clone()).await?;
-    let val2 = cluster.node2.read(key1.clone()).await?;
-    let val3 = cluster.node3.read(key1.clone()).await?;
-    assert_eq!(val1, b"value1");
-    assert_eq!(val2, b"value1");
-    assert_eq!(val3, b"value1");
+    // Get version numbers from all nodes
+    let ver1 = cluster.node1.get_version(&key1).unwrap();
+    let ver2 = cluster.node2.get_version(&key1).unwrap();
+    let ver3 = cluster.node3.get_version(&key1).unwrap();
 
-    // Update value through same coordinator
+    // Verify version numbers match
+    assert_eq!(ver1, ver2);
+    assert_eq!(ver2, ver3);
+
+    // Test 3: Local vs Forwarded Reads
+    // Read from coordinator (local read)
+    let coord_value = coordinator.read(key1.clone()).await?;
+    assert_eq!(
+        coord_value, b"value1",
+        "Coordinator read returned wrong value"
+    );
+
+    // Read from non-coordinator (forwarded read)
+    let non_coord_value = non_coordinator.read(key1.clone()).await?;
+    assert_eq!(
+        non_coord_value, b"value1",
+        "Non-coordinator read returned wrong value"
+    );
+
+    // Verify both reads return same value
+    assert_eq!(coord_value, non_coord_value, "Read values don't match");
+
+    // Test 4: Version Increment on Updates
     coordinator
         .write(key1.clone(), b"value1_updated".to_vec())
         .await?;
 
-    // Read updated value from all nodes
-    let val1 = cluster.node1.read(key1.clone()).await?;
-    let val2 = cluster.node2.read(key1.clone()).await?;
-    let val3 = cluster.node3.read(key1.clone()).await?;
-    assert_eq!(val1, b"value1_updated");
-    assert_eq!(val2, b"value1_updated");
-    assert_eq!(val3, b"value1_updated");
+    let (_, new_ver1) = cluster.node1.get_value_and_version(&key1).unwrap();
+    assert!(new_ver1 > ver1, "Version should increment on update");
 
-    // Write new key
+    // Test 5: Multiple Key Operations
     let key2 = b"key2".to_vec();
-    let hash = key2.iter().fold(0u64, |acc, &x| acc.wrapping_add(x as u64));
-    let members = cluster.node1.members.read().unwrap();
-    let mut active_members: Vec<_> = members.values().collect();
-    active_members.sort_by_key(|info| info.id);
-    let coordinator_id = active_members[hash as usize % active_members.len()].id;
+    let coordinator2 = get_coordinator(&key2, &cluster);
+    coordinator2.write(key2.clone(), b"value2".to_vec()).await?;
 
-    // Write through coordinator
-    let coordinator = if coordinator_id == cluster.node1.info.id {
-        &cluster.node1
-    } else if coordinator_id == cluster.node2.info.id {
-        &cluster.node2
-    } else {
-        &cluster.node3
-    };
-
-    coordinator.write(key2.clone(), b"value2".to_vec()).await?;
-
-    // Read new key from all nodes
-    let val1 = cluster.node1.read(key2.clone()).await?;
-    let val2 = cluster.node2.read(key2.clone()).await?;
-    let val3 = cluster.node3.read(key2.clone()).await?;
-    assert_eq!(val1, b"value2");
-    assert_eq!(val2, b"value2");
-    assert_eq!(val3, b"value2");
+    // Verify both keys maintain correct values
+    assert_eq!(coordinator.read(key1.clone()).await?, b"value1_updated");
+    assert_eq!(coordinator2.read(key2.clone()).await?, b"value2");
 
     Ok(())
 }

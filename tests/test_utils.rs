@@ -76,3 +76,20 @@ pub async fn setup_test_cluster(base_port: u16) -> TestCluster {
         node3,
     }
 }
+
+#[allow(dead_code)]
+pub fn get_coordinator<'a>(key: &[u8], nodes: &'a TestCluster) -> &'a Arc<ClusterNode> {
+    let hash = key.iter().fold(0u64, |acc, &x| acc.wrapping_add(x as u64));
+    let members = nodes.node1.members.read().unwrap();
+    let mut active_members: Vec<_> = members.values().collect();
+    active_members.sort_by_key(|info| info.id);
+    let coordinator_id = active_members[hash as usize % active_members.len()].id;
+
+    if coordinator_id == nodes.node1.info.id {
+        &nodes.node1
+    } else if coordinator_id == nodes.node2.info.id {
+        &nodes.node2
+    } else {
+        &nodes.node3
+    }
+}

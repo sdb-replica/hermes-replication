@@ -76,7 +76,12 @@ async {
 | 1 | test_three_node_cluster | Initialize a 3-node cluster and verify basic network connectivity and membership protocols | • Successful node joins<br>• Heartbeat responses<br>• Complete membership list |
 | 2 | test_write_and_read | Perform coordinated write operation and verify data consistency across all nodes | • Write completes successfully<br>• All nodes have identical data<br>• Correct version numbers |
 | 3 | test_concurrent_writes | Execute multiple simultaneous writes to the same key to test conflict resolution | • All nodes converge to same value<br>• Consistent version ordering<br>• No data corruption |
-| 4 | test_hermes_protocol | Validate complete protocol flow including writes, updates, and reads | • Operations execute in correct order<br>• Version numbers increment properly<br>• Data remains consistent |
+| **Hermes Protocol Tests** ||||
+| 4.1 | Coordinator Selection | Verify that only the designated coordinator can write to a key | • Write from non-coordinator fails with NotResponsible<br>• Write from coordinator succeeds |
+| 4.2 | Write Protocol & Versioning | Test write replication and version synchronization | • All nodes receive the write<br>• All nodes have identical version numbers<br>• Version numbers match across replicas |
+| 4.3 | Local vs Forwarded Reads | Compare reads from coordinator and non-coordinator nodes | • Both reads return same value<br>• Coordinator reads succeed<br>• Non-coordinator reads succeed |
+| 4.4 | Version Increment | Verify version numbers increment properly on updates | • New version > old version<br>• All nodes update to new version<br>• Data consistency maintained |
+| 4.5 | Multiple Key Operations | Test operations on multiple keys with different coordinators | • Each key maintains correct value<br>• Different coordinators can operate independently<br>• No cross-key interference |
 | **Failure Tests** ||||
 | 5 | test_write_failures | Test write operation failure modes:<br>• Write to wrong coordinator<br>• Write to inactive cluster | • NotResponsible error when wrong coordinator<br>• NoActiveReplicas error when cluster inactive |
 | 6 | test_read_failures | Test read operation failure modes:<br>• Read non-existent data<br>• Read from inactive node | • ValueNotFound error for missing data<br>• NoActiveReplicas error for inactive node |

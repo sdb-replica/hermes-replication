@@ -19,8 +19,8 @@ let node = ClusterNode::new(
 
 // Write and read data
 async {
-    node.write("key".to_string(), b"value".to_vec()).await?;
-    let value = node.read("key".to_string()).await?;
+    node.write(b"key".to_vec(), b"value".to_vec()).await?;
+    let value = node.read(b"key".to_vec()).await?;
     assert_eq!(value, b"value");
 };
 ```
@@ -48,10 +48,11 @@ async {
    - Update local copy
    - Serve read
 
-### Node States
-- Active: Node can participate in operations
-- Inactive: Node cannot participate in operations
-- Suspected: Node is potentially unhealthy (not fully implemented)
+### Version Management
+- Globally unique versions using node ID and counter
+- High 16 bits: Node identifier
+- Low 48 bits: Monotonic counter
+- Ensures consistent ordering of concurrent writes
 
 ### Error Handling
 - NotResponsible: Node is not coordinator for key
@@ -60,13 +61,34 @@ async {
 - QuorumFailed: Failed to reach required replicas
 - ValueNotFound: Key does not exist
 
+### Node States
+- Active: Node can participate in operations
+- Inactive: Node cannot participate in operations
+- Suspected: Node is potentially unhealthy
+
 ## Testing
 
-### Cluster Tests
+### Test Summary
+
+| # | Test Case | Description | Expected Result |
+|---|-----------|-------------|-----------------|
+| **Cluster Tests** ||||
+| 1 | test_three_node_cluster | Initialize a 3-node cluster and verify basic network connectivity and membership protocols | • Successful node joins<br>• Heartbeat responses<br>• Complete membership list |
+| 2 | test_write_and_read | Perform coordinated write operation and verify data consistency across all nodes | • Write completes successfully<br>• All nodes have identical data<br>• Correct version numbers |
+| 3 | test_concurrent_writes | Execute multiple simultaneous writes to the same key to test conflict resolution | • All nodes converge to same value<br>• Consistent version ordering<br>• No data corruption |
+| 4 | test_hermes_protocol | Validate complete protocol flow including writes, updates, and reads | • Operations execute in correct order<br>• Version numbers increment properly<br>• Data remains consistent |
+| **Failure Tests** ||||
+| 5 | test_write_failures | Test write operation failure modes:<br>• Write to wrong coordinator<br>• Write to inactive cluster | • NotResponsible error when wrong coordinator<br>• NoActiveReplicas error when cluster inactive |
+| 6 | test_read_failures | Test read operation failure modes:<br>• Read non-existent data<br>• Read from inactive node | • ValueNotFound error for missing data<br>• NoActiveReplicas error for inactive node |
+| 7 | test_network_failures | Simulate network partition by disconnecting nodes during operation | • QuorumFailed error when unable to reach sufficient replicas<br>• Consistent state after recovery |
+| 8 | test_quorum_failures | Test behavior when insufficient nodes are available for consensus | • QuorumFailed error when consensus impossible<br>• No partial updates |
+
+### Test Coverage
 - Multi-node cluster setup
 - Write/read operations
 - Node state changes
 - Membership changes
+- Concurrent write handling
 
 ### Failure Tests
 - Write coordination failures
@@ -77,14 +99,27 @@ async {
 ## Implementation Status
 
 ✅ Basic replication protocol
+
 ✅ Key-based coordinator selection
+
 ✅ Local reads from valid copies
+
 ✅ Error handling
+
 ✅ Network communication
+
 ✅ Test coverage
+
+✅ Concurrent write handling
+
+✅ Version management
+
 ⏳ Persistence (TODO)
+
 ⏳ Node recovery (TODO)
+
 ⏳ Consistent hashing for replica selection (TODO)
+
 ⏳ Full invalidation phase (TODO)
 
 ## References

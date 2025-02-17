@@ -26,8 +26,8 @@
 //!
 //! // Write and read data
 //! async {
-//!     node.write("key".to_string(), b"value".to_vec()).await?;
-//!     let value = node.read("key".to_string()).await?;
+//!     node.write(b"key".to_vec(), b"value".to_vec()).await?;
+//!     let value = node.read(b"key".to_vec()).await?;
 //!     assert_eq!(value, b"value");
 //!     Ok::<(), Box<dyn std::error::Error>>(())
 //! };

@@ -2,13 +2,8 @@ use crate::network::NetworkClient;
 use crate::types::{ClusterMessage, HermesError, NodeId, NodeInfo, NodeState};
 use std::collections::{HashMap, HashSet};
 use std::net::SocketAddr;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, RwLock};
-
-/// Represents a versioned value in the data store
-type VersionedValue = (Vec<u8>, u64); // (value, version)
-
-/// Represents the data store mapping keys to versioned values
-type DataStore = Arc<RwLock<HashMap<String, VersionedValue>>>;
 
 /// Represents a node in the Hermes cluster
 pub struct ClusterNode {
@@ -20,10 +15,13 @@ pub struct ClusterNode {
 
     /// Local data store
     /// TODO: Make this persistent.
-    data: DataStore,
+    #[allow(clippy::type_complexity)]
+    data: Arc<RwLock<HashMap<Vec<u8>, (Vec<u8>, u64)>>>, // (key, (value, version))
 
     /// Pending invalidations
-    pending_invalidations: Arc<RwLock<HashMap<String, HashSet<NodeId>>>>, // key -> set of nodes that need to ack
+    pending_invalidations: Arc<RwLock<HashMap<Vec<u8>, HashSet<NodeId>>>>, // key -> set of nodes that need to ack
+
+    version_counter: AtomicU64, // Add atomic version counter
 }
 
 impl ClusterNode {
@@ -39,10 +37,15 @@ impl ClusterNode {
             members: Arc::new(RwLock::new(HashMap::from([(info.id, info)]))),
             data: Arc::new(RwLock::new(HashMap::new())),
             pending_invalidations: Arc::new(RwLock::new(HashMap::new())),
+            version_counter: AtomicU64::new(0), // Initialize version counter
         }
     }
 
-    pub async fn handle_message(&self, from: NodeId, message: ClusterMessage) -> Option<ClusterMessage> {
+    pub async fn handle_message(
+        &self,
+        from: NodeId,
+        message: ClusterMessage,
+    ) -> Option<ClusterMessage> {
         match message {
             ClusterMessage::JoinRequest(node_info) => self.handle_join_request(node_info),
             ClusterMessage::Invalidation { .. } => self.handle_invalidation(from, message),
@@ -85,16 +88,22 @@ impl ClusterNode {
 
     fn handle_join_request(&self, node_info: NodeInfo) -> Option<ClusterMessage> {
         // Add the new node
-        self.members.write().unwrap().insert(node_info.id, node_info.clone());
+        self.members
+            .write()
+            .unwrap()
+            .insert(node_info.id, node_info.clone());
 
         // Send back our complete member list
-        let members: Vec<NodeInfo> =
-            self.members.read().unwrap().values().cloned().collect();
+        let members: Vec<NodeInfo> = self.members.read().unwrap().values().cloned().collect();
 
         Some(ClusterMessage::JoinResponse(members))
     }
 
-    fn handle_invalidation(&self, _from: NodeId, message: ClusterMessage) -> Option<ClusterMessage> {
+    fn handle_invalidation(
+        &self,
+        _from: NodeId,
+        message: ClusterMessage,
+    ) -> Option<ClusterMessage> {
         match message {
             ClusterMessage::Invalidation { key, version } => {
                 // Handle incoming invalidation by marking local data as invalid
@@ -117,11 +126,14 @@ impl ClusterNode {
                 value,
                 version,
             } => {
-                // Update local data with the new value
-                self.data
-                    .write()
-                    .unwrap()
-                    .insert(key.clone(), (value, version));
+                // Only update if new version is higher
+                let mut data = self.data.write().unwrap();
+                if let Some((_, current_version)) = data.get(&key) {
+                    if version <= *current_version {
+                        return Some(ClusterMessage::ValidationAck { key, version });
+                    }
+                }
+                data.insert(key.clone(), (value, version));
                 Some(ClusterMessage::ValidationAck { key, version })
             }
             _ => None,
@@ -160,7 +172,7 @@ impl ClusterNode {
     /// - Using versioning to detect concurrent writes
     /// - Invalidating all copies before updating any copy
     /// - Maintaining the invariant that a valid copy is always up-to-date
-    pub async fn write(&self, key: String, value: Vec<u8>) -> Result<(), HermesError> {
+    pub async fn write(&self, key: Vec<u8>, value: Vec<u8>) -> Result<(), HermesError> {
         // Check if node is active
         {
             let members = self.members.read().unwrap();
@@ -173,9 +185,10 @@ impl ClusterNode {
 
         // In Hermes, each key is assigned to a specific coordinator
         let coordinator_id = {
-            let hash = key.as_bytes().iter().fold(0u64, |acc, &x| acc.wrapping_add(x as u64));
+            let hash = key.iter().fold(0u64, |acc, &x| acc.wrapping_add(x as u64));
             let members = self.members.read().unwrap();
-            let mut active_members: Vec<_> = members.values()
+            let mut active_members: Vec<_> = members
+                .values()
                 .filter(|info| info.state == NodeState::Active)
                 .collect();
             if active_members.is_empty() {
@@ -190,6 +203,7 @@ impl ClusterNode {
             return Err(HermesError::NotResponsible);
         }
 
+        // Get next version for this key
         let version = self.get_next_version(&key);
 
         // Get all active nodes for replication
@@ -207,21 +221,18 @@ impl ClusterNode {
         let mut failed_nodes = Vec::new();
 
         for (node_id, address) in member_addresses {
-            if address.port() == 0 {
-                return Err(HermesError::NetworkError("Invalid port 0".to_string()));
-            }
             match NetworkClient::connect(address).await {
                 Ok(client) => {
                     clients.insert(node_id, client);
                 }
-                Err(e) => {
+                Err(_) => {
+                    // Don't return early, collect all failures
                     failed_nodes.push(node_id);
-                    println!("Failed to connect to node {:?}: {}", node_id, e);
                 }
             }
         }
 
-        // Update all nodes
+        // Update all nodes with the new version
         for (node_id, mut client) in clients {
             match client
                 .send(ClusterMessage::Validation {
@@ -231,12 +242,15 @@ impl ClusterNode {
                 })
                 .await
             {
-                Ok(Some(ClusterMessage::ValidationAck { .. })) => (),
+                Ok(Some(ClusterMessage::ValidationAck {
+                    version: ack_version,
+                    ..
+                })) if ack_version == version => (),
                 _ => failed_nodes.push(node_id),
             }
         }
 
-        // Update local copy
+        // Update local copy with the new version
         self.data.write().unwrap().insert(key, (value, version));
 
         if !failed_nodes.is_empty() {
@@ -249,17 +263,17 @@ impl ClusterNode {
         Ok(())
     }
 
-    fn get_next_version(&self, key: &str) -> u64 {
-        self.data
-            .read()
-            .unwrap()
-            .get(key)
-            .map(|(_, v)| v + 1)
-            .unwrap_or(1)
+    fn get_next_version(&self, _key: &[u8]) -> u64 {
+        // Use high 16 bits for node ID hash, low 48 bits for counter
+        let node_hash = self.info.id.0.as_u128() as u64; // Get hash of UUID
+        let counter = self.version_counter.fetch_add(1, Ordering::SeqCst);
+
+        // Combine node hash (high 16 bits) with counter (low 48 bits)
+        ((node_hash & 0xFFFF) << 48) | (counter & 0xFFFFFFFFFFFF)
     }
 
     // Add helper method to check if invalidation is complete
-    pub fn is_invalidation_complete(&self, key: &str) -> bool {
+    pub fn is_invalidation_complete(&self, key: &[u8]) -> bool {
         self.pending_invalidations
             .read()
             .unwrap()
@@ -267,9 +281,9 @@ impl ClusterNode {
             .map_or(true, |nodes| nodes.is_empty())
     }
 
-    pub fn get_replica_nodes(&self, key: &str) -> HashSet<NodeId> {
+    pub fn get_replica_nodes(&self, key: &[u8]) -> HashSet<NodeId> {
         let members = self.members.read().unwrap();
-        println!("\nGetting replicas for key: {}", key);
+        println!("\nGetting replicas for key: {:?}", key);
         println!("Total members: {}", members.len());
 
         let mut replicas = HashSet::new();
@@ -308,7 +322,7 @@ impl ClusterNode {
     /// - Using versioning to detect concurrent writes
     /// - Invalidating all copies before updating any copy
     /// - Maintaining the invariant that a valid copy is always up-to-date
-    pub async fn read(&self, key: String) -> Result<Vec<u8>, HermesError> {
+    pub async fn read(&self, key: Vec<u8>) -> Result<Vec<u8>, HermesError> {
         let replica_nodes = self.get_replica_nodes(&key);
 
         // First check if there are any active replicas
@@ -399,12 +413,33 @@ mod tests {
         let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 8080);
         let node = ClusterNode::new(addr);
 
-        assert_eq!(node.get_next_version("key1"), 1);
+        // Get initial version
+        let v1 = node.get_next_version("key1".as_bytes());
+
+        // Insert data with version 1
         node.data
             .write()
             .unwrap()
-            .insert("key1".to_string(), (vec![], 1));
-        assert_eq!(node.get_next_version("key1"), 2);
+            .insert("key1".to_string().into_bytes(), (vec![], v1));
+
+        // Get next version
+        let v2 = node.get_next_version("key1".as_bytes());
+
+        // Verify versions are different and increasing
+        assert!(v2 > v1, "Version should increase");
+
+        // Verify high 16 bits contain node hash
+        let node_hash = (v1 >> 48) & 0xFFFF;
+        assert_eq!(
+            node_hash,
+            (v2 >> 48) & 0xFFFF,
+            "Node hash portion should be constant"
+        );
+
+        // Verify low 48 bits are sequential
+        let counter1 = v1 & 0xFFFFFFFFFFFF;
+        let counter2 = v2 & 0xFFFFFFFFFFFF;
+        assert_eq!(counter2, counter1 + 1, "Counter should increment by 1");
     }
 
     #[test]
@@ -412,7 +447,7 @@ mod tests {
         let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 8080);
         let node = ClusterNode::new(addr);
 
-        let replicas = node.get_replica_nodes("key1");
+        let replicas = node.get_replica_nodes("key1".as_bytes());
         assert_eq!(replicas.len(), 1);
         assert!(replicas.contains(&node.info.id));
     }

@@ -103,7 +103,7 @@ impl NetworkClient {
 
     pub async fn send_invalidation(
         &mut self,
-        key: String,
+        key: Vec<u8>,
         version: u64,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let message = ClusterMessage::Invalidation { key, version };

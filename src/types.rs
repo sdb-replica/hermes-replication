@@ -34,32 +34,32 @@ pub enum ClusterMessage {
 
     // Hermes protocol messages
     Invalidation {
-        key: String,
+        key: Vec<u8>,
         version: u64,
     },
     InvalidationAck {
-        key: String,
+        key: Vec<u8>,
         version: u64,
     },
     DataUpdate {
-        key: String,
+        key: Vec<u8>,
         value: Vec<u8>,
         version: u64,
     },
     Validation {
-        key: String,
+        key: Vec<u8>,
         value: Vec<u8>,
         version: u64,
     },
     ValidationAck {
-        key: String,
+        key: Vec<u8>,
         version: u64,
     },
     ReadRequest {
-        key: String,
+        key: Vec<u8>,
     },
     ReadResponse {
-        key: String,
+        key: Vec<u8>,
         value: Vec<u8>,
         version: u64,
     },
@@ -129,7 +129,7 @@ pub enum HermesError {
     QuorumFailed(String),
 
     /// Requested value not found
-    ValueNotFound(String),
+    ValueNotFound(Vec<u8>),
 }
 
 impl fmt::Display for HermesError {
@@ -139,7 +139,7 @@ impl fmt::Display for HermesError {
             HermesError::NoActiveReplicas => write!(f, "No active replicas available"),
             HermesError::NetworkError(e) => write!(f, "Network error: {}", e),
             HermesError::QuorumFailed(e) => write!(f, "Failed to achieve quorum: {}", e),
-            HermesError::ValueNotFound(key) => write!(f, "Value not found for key: {}", key),
+            HermesError::ValueNotFound(key) => write!(f, "Value not found for key: {:?}", key),
         }
     }
 }
